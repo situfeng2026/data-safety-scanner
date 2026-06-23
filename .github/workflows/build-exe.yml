@@ -21,11 +21,10 @@ jobs:
         run: pip install pyinstaller
 
       - name: Build EXE
-        run: |
-          pyinstaller --onefile --windowed --name "数据安全检查工具" --add-data "README.md;." --distpath "." --workpath "$env:TEMP\pyibuild" --specpath "$env:TEMP\pyispec" DataSafetyScanner.py
+        run: pyinstaller --onefile --windowed --name "数据安全检查工具" --add-data "README.md;." DataSafetyScanner.py
 
       - name: Upload EXE
         uses: actions/upload-artifact@v4
         with:
           name: DataSafetyScanner
-          path: 数据安全检查工具.exe
+          path: dist/数据安全检查工具.exe
