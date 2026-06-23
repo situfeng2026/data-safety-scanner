@@ -197,6 +197,9 @@ SUPPORTED_EXTENSIONS = {
     '.properties': 'text',
     '.xlsx': 'excel',
     '.xls': 'excel',
+    '.docx': 'word',
+    '.doc': 'word',
+    '.pdf': 'pdf',
 }
 
 # 最大文件大小（默认10MB）
@@ -239,6 +242,14 @@ class ScanEngine:
         # Excel文件处理
         if SUPPORTED_EXTENSIONS.get(ext) == 'excel':
             return self._scan_excel_file(file_path, enabled_patterns)
+
+        # Word文档处理
+        if SUPPORTED_EXTENSIONS.get(ext) == 'word':
+            return self._scan_word_file(file_path, enabled_patterns)
+
+        # PDF文档处理
+        if SUPPORTED_EXTENSIONS.get(ext) == 'pdf':
+            return self._scan_pdf_file(file_path, enabled_patterns)
 
         # 尝试以文本方式读取（纯文本文件）
         try:
@@ -376,6 +387,99 @@ class ScanEngine:
                         'cell_ref': cell_ref,
                         'sheet_name': sheet_name,
                     })
+
+    def _scan_word_file(self, file_path, enabled_patterns):
+        """扫描Word文档（.docx），读取段落和表格中的文本"""
+        if self.stop_flag.is_set():
+            return []
+        try:
+            from docx import Document
+            doc = Document(file_path)
+        except Exception:
+            return []
+
+        matches = []
+        # 扫描段落
+        for para_idx, para in enumerate(doc.paragraphs):
+            if self.stop_flag.is_set():
+                break
+            text = para.text.strip()
+            if not text or len(text) < 2:
+                continue
+            matches.extend(self._scan_text_block(text, para_idx + 1, file_path, enabled_patterns, 'paragraph'))
+
+        # 扫描表格
+        for table_idx, table in enumerate(doc.tables):
+            if self.stop_flag.is_set():
+                break
+            for row_idx, row in enumerate(table.rows):
+                for cell in row.cells:
+                    text = cell.text.strip()
+                    if not text or len(text) < 2:
+                        continue
+                    line_num = f"table{table_idx + 1}_row{row_idx + 1}"
+                    matches.extend(self._scan_text_block(text, line_num, file_path, enabled_patterns, 'table'))
+        return matches
+
+    def _scan_pdf_file(self, file_path, enabled_patterns):
+        """扫描PDF文件，提取每页文本"""
+        if self.stop_flag.is_set():
+            return []
+        try:
+            from pypdf import PdfReader
+            reader = PdfReader(file_path)
+        except Exception:
+            return []
+
+        matches = []
+        for page_idx, page in enumerate(reader.pages):
+            if self.stop_flag.is_set():
+                break
+            text = page.extract_text()
+            if not text:
+                continue
+            lines = text.split('\n')
+            for line_idx, line in enumerate(lines):
+                if self.stop_flag.is_set():
+                    break
+                line = line.strip()
+                if not line or len(line) < 2:
+                    continue
+                line_num = f"p{page_idx + 1}_l{line_idx + 1}"
+                matches.extend(self._scan_text_block(line, line_num, file_path, enabled_patterns, 'page'))
+        return matches
+
+    def _scan_text_block(self, text, line_number, file_path, enabled_patterns, source_type):
+        """通用文本块扫描逻辑，供Word/PDF共用"""
+        if self.stop_flag.is_set():
+            return []
+        results = []
+        for pattern_info in enabled_patterns:
+            if self.stop_flag.is_set():
+                break
+            try:
+                regex = re.compile(pattern_info['pattern'])
+            except re.error:
+                continue
+            for match in regex.finditer(text):
+                matched_text = match.group()
+                start_pos = match.start()
+                context_start = max(0, start_pos - 20)
+                context_end = min(len(text), start_pos + len(matched_text) + 20)
+                context = text[context_start:context_end].strip()
+                results.append({
+                    'file_path': file_path,
+                    'file_name': os.path.basename(file_path),
+                    'file_dir': os.path.dirname(file_path),
+                    'line_number': line_number,
+                    'matched_text': matched_text[:100],
+                    'pattern_name': pattern_info['name'],
+                    'risk': pattern_info['risk'],
+                    'context': context,
+                    'full_line': text,
+                    'source_type': source_type,
+                })
+        return results
 
     def scan_directory(self, directory, enabled_patterns, progress_callback=None):
         """递归扫描目录"""
@@ -827,10 +931,19 @@ class DataSafetyScannerApp:
 
         for r in self.filtered_results:
             file_rel = r['file_name']
-            # Excel文件：显示工作表+单元格位置；普通文件：显示行号
-            line_display = r.get('cell_ref', '') or str(r['line_number'])
-            if r.get('sheet_name'):
-                line_display = f"{r['sheet_name']}!{line_display}"
+            # 根据文件类型显示位置信息
+            if r.get('cell_ref'):
+                line_display = f"{r['sheet_name']}!{r['cell_ref']}"
+            elif r.get('source_type') == 'page':
+                # PDF: p1_l5 → 第1页 第5行
+                parts = str(r['line_number']).split('_l')
+                page = parts[0][1:]  # 'p1' → '1'
+                line = parts[1] if len(parts) > 1 else '?'
+                line_display = f"第{page}页 第{line}行"
+            elif isinstance(r['line_number'], int):
+                line_display = f"第 {r['line_number']} 行"
+            else:
+                line_display = str(r['line_number'])
             self.tree.insert('', tk.END, values=(
                 file_rel,
                 r['pattern_name'],
@@ -1064,11 +1177,15 @@ class DataSafetyScannerApp:
                     f.write("─" * 56 + "\n\n")
                     for i, r in enumerate(report_data['details'], 1):
                         risk_symbol = "🔴" if r['risk'] == '高' else ("" if r['risk'] == '中' else "")
-                        # Excel文件显示单元格位置，普通文件显示行号
                         if r.get('cell_ref'):
                             location = f"{r['sheet_name']}!{r['cell_ref']} 单元格"
-                        else:
+                        elif r.get('source_type') == 'page':
+                            parts = str(r['line_number']).split('_l')
+                            location = f"第{parts[0][1:]}页 第{parts[1]}行"
+                        elif isinstance(r['line_number'], int):
                             location = f"第 {r['line_number']} 行"
+                        else:
+                            location = str(r['line_number'])
                         f.write(f"  【第 {i} 条】{risk_symbol} [{r['risk']}] {r['pattern_name']}\n")
                         f.write(f"     文件：{r['file_path']} → {location}\n")
                         f.write(f"     内容：{r['matched_text']}\n")

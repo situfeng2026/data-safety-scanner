@@ -18,7 +18,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install PyInstaller & dependencies
-        run: pip install pyinstaller openpyxl xlrd
+        run: pip install pyinstaller openpyxl xlrd python-docx pypdf
 
       - name: Build EXE
         run: pyinstaller --onefile --windowed --name "数据安全检查工具" --add-data "README.md;." DataSafetyScanner.py
