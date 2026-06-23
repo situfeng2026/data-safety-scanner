@@ -200,6 +200,8 @@ SUPPORTED_EXTENSIONS = {
     '.docx': 'word',
     '.doc': 'word',
     '.pdf': 'pdf',
+    '.pptx': 'ppt',
+    '.ppt': 'ppt',
 }
 
 # 最大文件大小（默认10MB）
@@ -250,6 +252,10 @@ class ScanEngine:
         # PDF文档处理
         if SUPPORTED_EXTENSIONS.get(ext) == 'pdf':
             return self._scan_pdf_file(file_path, enabled_patterns)
+
+        # PPT演示文稿处理
+        if SUPPORTED_EXTENSIONS.get(ext) == 'ppt':
+            return self._scan_ppt_file(file_path, enabled_patterns)
 
         # 尝试以文本方式读取（纯文本文件）
         try:
@@ -447,6 +453,40 @@ class ScanEngine:
                     continue
                 line_num = f"p{page_idx + 1}_l{line_idx + 1}"
                 matches.extend(self._scan_text_block(line, line_num, file_path, enabled_patterns, 'page'))
+        return matches
+
+    def _scan_ppt_file(self, file_path, enabled_patterns):
+        """扫描PowerPoint演示文稿（.pptx），读取所有幻灯片中的文本"""
+        if self.stop_flag.is_set():
+            return []
+        try:
+            from pptx import Presentation
+            prs = Presentation(file_path)
+        except Exception:
+            return []
+
+        matches = []
+        for slide_idx, slide in enumerate(prs.slides):
+            if self.stop_flag.is_set():
+                break
+            for shape in slide.shapes:
+                if self.stop_flag.is_set():
+                    break
+                if shape.has_text_frame:
+                    for para in shape.text_frame.paragraphs:
+                        text = para.text.strip()
+                        if not text or len(text) < 2:
+                            continue
+                        line_num = f"s{slide_idx + 1}"
+                        matches.extend(self._scan_text_block(text, line_num, file_path, enabled_patterns, 'slide'))
+                if shape.has_table:
+                    for row in shape.table.rows:
+                        for cell in row.cells:
+                            text = cell.text.strip()
+                            if not text or len(text) < 2:
+                                continue
+                            line_num = f"s{slide_idx + 1}"
+                            matches.extend(self._scan_text_block(text, line_num, file_path, enabled_patterns, 'slide'))
         return matches
 
     def _scan_text_block(self, text, line_number, file_path, enabled_patterns, source_type):
@@ -940,6 +980,8 @@ class DataSafetyScannerApp:
                 page = parts[0][1:]  # 'p1' → '1'
                 line = parts[1] if len(parts) > 1 else '?'
                 line_display = f"第{page}页 第{line}行"
+            elif r.get('source_type') == 'slide':
+                line_display = f"第{r['line_number'][1:]}张幻灯片"
             elif isinstance(r['line_number'], int):
                 line_display = f"第 {r['line_number']} 行"
             else:
@@ -1182,6 +1224,8 @@ class DataSafetyScannerApp:
                         elif r.get('source_type') == 'page':
                             parts = str(r['line_number']).split('_l')
                             location = f"第{parts[0][1:]}页 第{parts[1]}行"
+                        elif r.get('source_type') == 'slide':
+                            location = f"第{r['line_number'][1:]}张幻灯片"
                         elif isinstance(r['line_number'], int):
                             location = f"第 {r['line_number']} 行"
                         else:
