@@ -195,6 +195,8 @@ SUPPORTED_EXTENSIONS = {
     '.ps1': 'text',
     '.env': 'text',
     '.properties': 'text',
+    '.xlsx': 'excel',
+    '.xls': 'excel',
 }
 
 # 最大文件大小（默认10MB）
@@ -234,7 +236,11 @@ class ScanEngine:
         except (OSError, IOError):
             return []
 
-        # 尝试以文本方式读取
+        # Excel文件处理
+        if SUPPORTED_EXTENSIONS.get(ext) == 'excel':
+            return self._scan_excel_file(file_path, enabled_patterns)
+
+        # 尝试以文本方式读取（纯文本文件）
         try:
             with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
                 content = f.read()
@@ -287,6 +293,89 @@ class ScanEngine:
                     })
 
         return matches
+
+    def _scan_excel_file(self, file_path, enabled_patterns):
+        """扫描Excel文件（.xlsx / .xls），读取每个单元格的内容"""
+        if self.stop_flag.is_set():
+            return []
+        matches = []
+        try:
+            ext = os.path.splitext(file_path)[1].lower()
+            if ext == '.xlsx':
+                import openpyxl
+                wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+            else:
+                import xlrd
+                wb = xlrd.open_workbook(file_path)
+        except Exception:
+            return []
+
+        for sheet_name in wb.sheet_names:
+            if self.stop_flag.is_set():
+                break
+            try:
+                if ext == '.xlsx':
+                    ws = wb[sheet_name]
+                    for row_idx, row in enumerate(ws.iter_rows(values_only=True), 1):
+                        self._scan_excel_row(row, row_idx, sheet_name, file_path, enabled_patterns, matches)
+                else:
+                    ws = wb.sheet_by_name(sheet_name)
+                    for row_idx in range(ws.nrows):
+                        row = ws.row_values(row_idx)
+                        self._scan_excel_row(row, row_idx + 1, sheet_name, file_path, enabled_patterns, matches)
+            except Exception:
+                continue
+
+        if ext == '.xlsx':
+            wb.close()
+        return matches
+
+    def _scan_excel_row(self, row, row_idx, sheet_name, file_path, enabled_patterns, matches):
+        """扫描Excel的一行数据"""
+        for col_idx, cell_value in enumerate(row):
+            if self.stop_flag.is_set():
+                return
+            if cell_value is None:
+                continue
+            cell_text = str(cell_value).strip()
+            if not cell_text or len(cell_text) < 2:
+                continue
+
+            for pattern_info in enabled_patterns:
+                try:
+                    regex = re.compile(pattern_info['pattern'])
+                except re.error:
+                    continue
+                for match in regex.finditer(cell_text):
+                    matched_text = match.group()
+                    start_pos = match.start()
+                    context_start = max(0, start_pos - 20)
+                    context_end = min(len(cell_text), start_pos + len(matched_text) + 20)
+                    context = cell_text[context_start:context_end].strip()
+
+                    # 列号转字母（A, B, ..., Z, AA, AB...）
+                    col_letter = ''
+                    c = col_idx
+                    while c >= 0:
+                        col_letter = chr(65 + (c % 26)) + col_letter
+                        c = c // 26 - 1
+                        if c < 0:
+                            break
+                    cell_ref = f"{col_letter}{row_idx}"
+
+                    matches.append({
+                        'file_path': file_path,
+                        'file_name': os.path.basename(file_path),
+                        'file_dir': os.path.dirname(file_path),
+                        'line_number': row_idx,
+                        'matched_text': matched_text[:100],
+                        'pattern_name': pattern_info['name'],
+                        'risk': pattern_info['risk'],
+                        'context': context,
+                        'full_line': cell_text,
+                        'cell_ref': cell_ref,
+                        'sheet_name': sheet_name,
+                    })
 
     def scan_directory(self, directory, enabled_patterns, progress_callback=None):
         """递归扫描目录"""
@@ -738,12 +827,16 @@ class DataSafetyScannerApp:
 
         for r in self.filtered_results:
             file_rel = r['file_name']
+            # Excel文件：显示工作表+单元格位置；普通文件：显示行号
+            line_display = r.get('cell_ref', '') or str(r['line_number'])
+            if r.get('sheet_name'):
+                line_display = f"{r['sheet_name']}!{line_display}"
             self.tree.insert('', tk.END, values=(
                 file_rel,
                 r['pattern_name'],
                 r['risk'],
                 r['matched_text'][:80],
-                r['line_number'],
+                line_display,
                 r['file_dir']
             ))
 
@@ -970,9 +1063,14 @@ class DataSafetyScannerApp:
                     f.write("  敏感信息详单\n")
                     f.write("─" * 56 + "\n\n")
                     for i, r in enumerate(report_data['details'], 1):
-                        risk_symbol = "🔴" if r['risk'] == '高' else ("🟡" if r['risk'] == '中' else "🟢")
+                        risk_symbol = "🔴" if r['risk'] == '高' else ("" if r['risk'] == '中' else "")
+                        # Excel文件显示单元格位置，普通文件显示行号
+                        if r.get('cell_ref'):
+                            location = f"{r['sheet_name']}!{r['cell_ref']} 单元格"
+                        else:
+                            location = f"第 {r['line_number']} 行"
                         f.write(f"  【第 {i} 条】{risk_symbol} [{r['risk']}] {r['pattern_name']}\n")
-                        f.write(f"     文件：{r['file_path']} → 第 {r['line_number']} 行\n")
+                        f.write(f"     文件：{r['file_path']} → {location}\n")
                         f.write(f"     内容：{r['matched_text']}\n")
                         f.write(f"     上下文：{r['context']}\n")
                         f.write("  " + "·" * 52 + "\n\n")
