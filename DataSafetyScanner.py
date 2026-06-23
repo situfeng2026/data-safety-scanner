@@ -245,25 +245,33 @@ class ScanEngine:
         except (OSError, IOError):
             return []
 
+        # 预编译正则（只做一次）
+        compiled = []
+        for p in enabled_patterns:
+            try:
+                compiled.append((re.compile(p['pattern']), p))
+            except re.error:
+                continue
+
         # Excel文件处理
         if SUPPORTED_EXTENSIONS.get(ext) == 'excel':
-            return self._scan_excel_file(file_path, enabled_patterns)
+            return self._scan_excel_file(file_path, compiled)
 
         # Word文档处理
         if SUPPORTED_EXTENSIONS.get(ext) == 'word':
-            return self._scan_word_file(file_path, enabled_patterns)
+            return self._scan_word_file(file_path, compiled)
 
         # PDF文档处理
         if SUPPORTED_EXTENSIONS.get(ext) == 'pdf':
-            return self._scan_pdf_file(file_path, enabled_patterns)
+            return self._scan_pdf_file(file_path, compiled)
 
         # PPT演示文稿处理
         if SUPPORTED_EXTENSIONS.get(ext) == 'ppt':
-            return self._scan_ppt_file(file_path, enabled_patterns)
+            return self._scan_ppt_file(file_path, compiled)
 
         # 数据库文件处理
         if SUPPORTED_EXTENSIONS.get(ext) == 'database':
-            return self._scan_database_file(file_path, enabled_patterns)
+            return self._scan_database_file(file_path, compiled)
 
         # 尝试以文本方式读取（纯文本文件）
         try:
@@ -279,12 +287,7 @@ class ScanEngine:
         matches = []
         lines = content.split('\n')
 
-        for pattern_info in enabled_patterns:
-            try:
-                regex = re.compile(pattern_info['pattern'])
-            except re.error:
-                continue
-
+        for regex, pattern_info in compiled:
             for line_idx, line in enumerate(lines):
                 if self.stop_flag.is_set():
                     return matches
@@ -319,7 +322,7 @@ class ScanEngine:
 
         return matches
 
-    def _scan_excel_file(self, file_path, enabled_patterns):
+    def _scan_excel_file(self, file_path, compiled_patterns):
         """扫描Excel文件（.xlsx / .xls），读取每个单元格的内容"""
         if self.stop_flag.is_set():
             return []
@@ -335,19 +338,43 @@ class ScanEngine:
         except Exception:
             return []
 
+        MAX_EXCEL_ROWS = 100000
+        EMPTY_ROW_LIMIT = 50
+
         for sheet_name in wb.sheet_names:
             if self.stop_flag.is_set():
                 break
             try:
                 if ext == '.xlsx':
                     ws = wb[sheet_name]
+                    empty_count = 0
                     for row_idx, row in enumerate(ws.iter_rows(values_only=True), 1):
-                        self._scan_excel_row(row, row_idx, sheet_name, file_path, enabled_patterns, matches)
+                        if self.stop_flag.is_set():
+                            break
+                        if row_idx > MAX_EXCEL_ROWS:
+                            break
+                        # 连续空行快速跳过
+                        if all(c is None or str(c).strip() == '' for c in row):
+                            empty_count += 1
+                            if empty_count >= EMPTY_ROW_LIMIT:
+                                break
+                            continue
+                        empty_count = 0
+                        self._scan_excel_row_fast(row, row_idx, sheet_name, file_path, compiled_patterns, matches)
                 else:
                     ws = wb.sheet_by_name(sheet_name)
-                    for row_idx in range(ws.nrows):
+                    empty_count = 0
+                    for row_idx in range(min(ws.nrows, MAX_EXCEL_ROWS)):
+                        if self.stop_flag.is_set():
+                            break
                         row = ws.row_values(row_idx)
-                        self._scan_excel_row(row, row_idx + 1, sheet_name, file_path, enabled_patterns, matches)
+                        if all(c is None or str(c).strip() == '' for c in row):
+                            empty_count += 1
+                            if empty_count >= EMPTY_ROW_LIMIT:
+                                break
+                            continue
+                        empty_count = 0
+                        self._scan_excel_row_fast(row, row_idx + 1, sheet_name, file_path, compiled_patterns, matches)
             except Exception:
                 continue
 
@@ -355,8 +382,8 @@ class ScanEngine:
             wb.close()
         return matches
 
-    def _scan_excel_row(self, row, row_idx, sheet_name, file_path, enabled_patterns, matches):
-        """扫描Excel的一行数据"""
+    def _scan_excel_row_fast(self, row, row_idx, sheet_name, file_path, compiled_patterns, matches):
+        """快速扫描Excel的一行数据（使用预编译正则）"""
         for col_idx, cell_value in enumerate(row):
             if self.stop_flag.is_set():
                 return
@@ -366,11 +393,7 @@ class ScanEngine:
             if not cell_text or len(cell_text) < 2:
                 continue
 
-            for pattern_info in enabled_patterns:
-                try:
-                    regex = re.compile(pattern_info['pattern'])
-                except re.error:
-                    continue
+            for regex, pattern_info in compiled_patterns:
                 for match in regex.finditer(cell_text):
                     matched_text = match.group()
                     start_pos = match.start()
@@ -402,7 +425,7 @@ class ScanEngine:
                         'sheet_name': sheet_name,
                     })
 
-    def _scan_word_file(self, file_path, enabled_patterns):
+    def _scan_word_file(self, file_path, compiled_patterns):
         """扫描Word文档（.docx），读取段落和表格中的文本"""
         if self.stop_flag.is_set():
             return []
@@ -420,7 +443,7 @@ class ScanEngine:
             text = para.text.strip()
             if not text or len(text) < 2:
                 continue
-            matches.extend(self._scan_text_block(text, para_idx + 1, file_path, enabled_patterns, 'paragraph'))
+            matches.extend(self._scan_text_block(text, para_idx + 1, file_path, compiled_patterns, 'paragraph'))
 
         # 扫描表格
         for table_idx, table in enumerate(doc.tables):
@@ -432,10 +455,10 @@ class ScanEngine:
                     if not text or len(text) < 2:
                         continue
                     line_num = f"table{table_idx + 1}_row{row_idx + 1}"
-                    matches.extend(self._scan_text_block(text, line_num, file_path, enabled_patterns, 'table'))
+                    matches.extend(self._scan_text_block(text, line_num, file_path, compiled_patterns, 'table'))
         return matches
 
-    def _scan_pdf_file(self, file_path, enabled_patterns):
+    def _scan_pdf_file(self, file_path, compiled_patterns):
         """扫描PDF文件，提取每页文本"""
         if self.stop_flag.is_set():
             return []
@@ -460,10 +483,10 @@ class ScanEngine:
                 if not line or len(line) < 2:
                     continue
                 line_num = f"p{page_idx + 1}_l{line_idx + 1}"
-                matches.extend(self._scan_text_block(line, line_num, file_path, enabled_patterns, 'page'))
+                matches.extend(self._scan_text_block(line, line_num, file_path, compiled_patterns, 'page'))
         return matches
 
-    def _scan_ppt_file(self, file_path, enabled_patterns):
+    def _scan_ppt_file(self, file_path, compiled_patterns):
         """扫描PowerPoint演示文稿（.pptx），读取所有幻灯片中的文本"""
         if self.stop_flag.is_set():
             return []
@@ -486,7 +509,7 @@ class ScanEngine:
                         if not text or len(text) < 2:
                             continue
                         line_num = f"s{slide_idx + 1}"
-                        matches.extend(self._scan_text_block(text, line_num, file_path, enabled_patterns, 'slide'))
+                        matches.extend(self._scan_text_block(text, line_num, file_path, compiled_patterns, 'slide'))
                 if shape.has_table:
                     for row in shape.table.rows:
                         for cell in row.cells:
@@ -494,10 +517,10 @@ class ScanEngine:
                             if not text or len(text) < 2:
                                 continue
                             line_num = f"s{slide_idx + 1}"
-                            matches.extend(self._scan_text_block(text, line_num, file_path, enabled_patterns, 'slide'))
+                            matches.extend(self._scan_text_block(text, line_num, file_path, compiled_patterns, 'slide'))
         return matches
 
-    def _scan_database_file(self, file_path, enabled_patterns):
+    def _scan_database_file(self, file_path, compiled_patterns):
         """扫描SQLite数据库文件，读取所有表的文本字段"""
         if self.stop_flag.is_set():
             return []
@@ -549,7 +572,7 @@ class ScanEngine:
                             matches.extend(self._scan_text_block(
                                 cell_text,
                                 f"row{rowid}",
-                                file_path, enabled_patterns, 'database'
+                                file_path, compiled_patterns, 'database'
                             ))
                             # 批量附加表名和列名信息
                             for m in matches:
@@ -562,18 +585,14 @@ class ScanEngine:
             conn.close()
         return matches
 
-    def _scan_text_block(self, text, line_number, file_path, enabled_patterns, source_type):
-        """通用文本块扫描逻辑，供Word/PDF共用"""
+    def _scan_text_block(self, text, line_number, file_path, compiled_patterns, source_type):
+        """通用文本块扫描逻辑（使用预编译正则）"""
         if self.stop_flag.is_set():
             return []
         results = []
-        for pattern_info in enabled_patterns:
+        for regex, pattern_info in compiled_patterns:
             if self.stop_flag.is_set():
                 break
-            try:
-                regex = re.compile(pattern_info['pattern'])
-            except re.error:
-                continue
             for match in regex.finditer(text):
                 matched_text = match.group()
                 start_pos = match.start()
