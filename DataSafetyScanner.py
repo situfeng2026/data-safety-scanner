@@ -202,6 +202,10 @@ SUPPORTED_EXTENSIONS = {
     '.pdf': 'pdf',
     '.pptx': 'ppt',
     '.ppt': 'ppt',
+    '.sqlite': 'database',
+    '.db': 'database',
+    '.db3': 'database',
+    '.sqlite3': 'database',
 }
 
 # 最大文件大小（默认10MB）
@@ -256,6 +260,10 @@ class ScanEngine:
         # PPT演示文稿处理
         if SUPPORTED_EXTENSIONS.get(ext) == 'ppt':
             return self._scan_ppt_file(file_path, enabled_patterns)
+
+        # 数据库文件处理
+        if SUPPORTED_EXTENSIONS.get(ext) == 'database':
+            return self._scan_database_file(file_path, enabled_patterns)
 
         # 尝试以文本方式读取（纯文本文件）
         try:
@@ -487,6 +495,71 @@ class ScanEngine:
                                 continue
                             line_num = f"s{slide_idx + 1}"
                             matches.extend(self._scan_text_block(text, line_num, file_path, enabled_patterns, 'slide'))
+        return matches
+
+    def _scan_database_file(self, file_path, enabled_patterns):
+        """扫描SQLite数据库文件，读取所有表的文本字段"""
+        if self.stop_flag.is_set():
+            return []
+        try:
+            import sqlite3
+            conn = sqlite3.connect(file_path)
+            conn.text_factory = str
+            cursor = conn.cursor()
+        except Exception:
+            return []
+
+        matches = []
+        try:
+            # 获取所有表名
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tables = [row[0] for row in cursor.fetchall()]
+
+            for table_name in tables:
+                if self.stop_flag.is_set():
+                    break
+                try:
+                    cursor.execute(f"PRAGMA table_info(\"{table_name}\")")
+                    columns = [row[1] for row in cursor.fetchall()]
+
+                    # 只处理文本类型列
+                    text_cols = []
+                    for col in columns:
+                        cursor.execute(f"PRAGMA table_info(\"{table_name}\")")
+                        col_info = [r for r in cursor.fetchall() if r[1] == col]
+                        if col_info and col_info[0][2].upper() in ('TEXT', 'VARCHAR', 'CHAR', 'CLOB', 'NVARCHAR', 'NCHAR', ''):
+                            text_cols.append(col)
+
+                    if not text_cols:
+                        continue
+
+                    # 读取数据（最多前10000行）
+                    cursor.execute(f"SELECT rowid, * FROM \"{table_name}\" LIMIT 10000")
+                    for row in cursor.fetchall():
+                        if self.stop_flag.is_set():
+                            break
+                        rowid = row[0]
+                        for col_idx, col_name in enumerate(text_cols, 1):
+                            cell_value = row[col_idx] if col_idx < len(row) else None
+                            if cell_value is None:
+                                continue
+                            cell_text = str(cell_value).strip()
+                            if not cell_text or len(cell_text) < 2:
+                                continue
+                            matches.extend(self._scan_text_block(
+                                cell_text,
+                                f"row{rowid}",
+                                file_path, enabled_patterns, 'database'
+                            ))
+                            # 批量附加表名和列名信息
+                            for m in matches:
+                                if m['source_type'] == 'database':
+                                    m['db_table'] = table_name
+                                    m['db_column'] = col_name
+                except Exception:
+                    continue
+        finally:
+            conn.close()
         return matches
 
     def _scan_text_block(self, text, line_number, file_path, enabled_patterns, source_type):
@@ -982,6 +1055,8 @@ class DataSafetyScannerApp:
                 line_display = f"第{page}页 第{line}行"
             elif r.get('source_type') == 'slide':
                 line_display = f"第{r['line_number'][1:]}张幻灯片"
+            elif r.get('source_type') == 'database':
+                line_display = f"{r.get('db_table','?')}.{r.get('db_column','?')} #{r['line_number'][3:]}"
             elif isinstance(r['line_number'], int):
                 line_display = f"第 {r['line_number']} 行"
             else:
@@ -1226,6 +1301,8 @@ class DataSafetyScannerApp:
                             location = f"第{parts[0][1:]}页 第{parts[1]}行"
                         elif r.get('source_type') == 'slide':
                             location = f"第{r['line_number'][1:]}张幻灯片"
+                        elif r.get('source_type') == 'database':
+                            location = f"表{r.get('db_table','?')}.{r.get('db_column','?')} 第{r['line_number'][3:]}行"
                         elif isinstance(r['line_number'], int):
                             location = f"第 {r['line_number']} 行"
                         else:
