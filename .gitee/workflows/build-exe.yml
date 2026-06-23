@@ -1,0 +1,23 @@
+pipeline:
+  name: Build EXE
+  on:
+    push:
+      branches: [main]
+
+  jobs:
+    build:
+      runs-on: windows-latest
+      steps:
+        - uses: actions/checkout@v3
+        - name: Setup Python
+          run: |
+            choco install python --version=3.12.0 -y
+        - name: Install PyInstaller
+          run: pip install pyinstaller
+        - name: Build EXE
+          run: pyinstaller --onefile --windowed --name "数据安全检查工具" --add-data "README.md;." DataSafetyScanner.py
+        - name: Upload artifact
+          uses: actions/upload-artifact@v3
+          with:
+            name: DataSafetyScanner
+            path: dist/数据安全检查工具.exe
