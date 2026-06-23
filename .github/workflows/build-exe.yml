@@ -18,7 +18,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install PyInstaller & dependencies
-        run: pip install pyinstaller openpyxl xlrd python-docx pypdf python-pptx
+        run: pip install pyinstaller openpyxl xlrd python-docx pypdf python-pptx python-calamine
 
       - name: Install UPX (compression)
         run: choco install upx -y --no-progress

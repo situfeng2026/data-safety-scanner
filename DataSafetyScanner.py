@@ -326,78 +326,133 @@ class ScanEngine:
         return matches
 
     def _scan_excel_file(self, file_path, compiled_patterns):
-        """扫描Excel文件（.xlsx / .xls），读取每个单元格的内容"""
+        """扫描Excel文件（.xlsx / .xls）- 使用高速引擎"""
         if self.stop_flag.is_set():
             return []
         matches = []
-        try:
-            ext = os.path.splitext(file_path)[1].lower()
-            if ext == '.xlsx':
-                import openpyxl
-                wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
-            else:
-                import xlrd
-                wb = xlrd.open_workbook(file_path)
-        except Exception:
-            return []
+        ext = os.path.splitext(file_path)[1].lower()
 
         MAX_EXCEL_ROWS = 100000
         EMPTY_ROW_LIMIT = 50
+        MAX_CELL_LENGTH = 2000
 
+        # 尝试用高速引擎（python_calamine，Rust实现）读取
+        # 速度是openpyxl的10-100倍
+        try:
+            from python_calamine import CalamineWorkbook
+            wb = CalamineWorkbook.from_path(file_path)
+        except Exception:
+            # 降级到openpyxl/xlrd
+            try:
+                if ext == '.xlsx':
+                    import openpyxl
+                    wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+                    fallback = 'openpyxl'
+                else:
+                    import xlrd
+                    wb = xlrd.open_workbook(file_path)
+                    fallback = 'xlrd'
+            except Exception:
+                return []
+            return self._scan_excel_legacy(file_path, compiled_patterns, wb, ext,
+                                           MAX_EXCEL_ROWS, EMPTY_ROW_LIMIT, MAX_CELL_LENGTH)
+
+        # ===== calamine高速扫描 =====
         for sheet_name in wb.sheet_names:
             if self.stop_flag.is_set():
                 break
             try:
-                if ext == '.xlsx':
-                    ws = wb[sheet_name]
+                sheet = wb.get_sheet_by_name(sheet_name)
+                empty_count = 0
+                for row_idx, row in enumerate(sheet.iter_rows(), 1):
+                    if self.stop_flag.is_set():
+                        break
+                    if row_idx > MAX_EXCEL_ROWS:
+                        break
+                    # 跳过全空行
+                    if all(c is None or str(c).strip() == '' for c in row):
+                        empty_count += 1
+                        if empty_count >= EMPTY_ROW_LIMIT:
+                            break
+                        continue
                     empty_count = 0
-                    for row_idx, row in enumerate(ws.iter_rows(values_only=True), 1):
-                        if self.stop_flag.is_set():
-                            break
-                        if row_idx > MAX_EXCEL_ROWS:
-                            break
-                        # 连续空行快速跳过
-                        if all(c is None or str(c).strip() == '' for c in row):
-                            empty_count += 1
-                            if empty_count >= EMPTY_ROW_LIMIT:
-                                break
-                            continue
-                        empty_count = 0
-                        self._scan_excel_row_fast(row, row_idx, sheet_name, file_path, compiled_patterns, matches)
-                else:
-                    ws = wb.sheet_by_name(sheet_name)
-                    empty_count = 0
-                    for row_idx in range(min(ws.nrows, MAX_EXCEL_ROWS)):
-                        if self.stop_flag.is_set():
-                            break
-                        row = ws.row_values(row_idx)
-                        if all(c is None or str(c).strip() == '' for c in row):
-                            empty_count += 1
-                            if empty_count >= EMPTY_ROW_LIMIT:
-                                break
-                            continue
-                        empty_count = 0
-                        self._scan_excel_row_fast(row, row_idx + 1, sheet_name, file_path, compiled_patterns, matches)
+                    self._scan_excel_row_fast(row, row_idx, sheet_name,
+                                              file_path, compiled_patterns, matches,
+                                              MAX_CELL_LENGTH)
             except Exception:
                 continue
-
-        if ext == '.xlsx':
-            wb.close()
         return matches
 
-    def _scan_excel_row_fast(self, row, row_idx, sheet_name, file_path, compiled_patterns, matches):
+    def _scan_excel_legacy(self, file_path, compiled_patterns, workbook, ext,
+                           max_rows, empty_limit, max_cell_len):
+        """降级方案：用openpyxl/xlrd扫描（兼容老格式）"""
+        matches = []
+        try:
+            if ext == '.xlsx':
+                for sheet_name in workbook.sheet_names:
+                    if self.stop_flag.is_set():
+                        break
+                    try:
+                        ws = workbook[sheet_name]
+                        empty_count = 0
+                        for row_idx, row in enumerate(ws.iter_rows(values_only=True), 1):
+                            if self.stop_flag.is_set():
+                                break
+                            if row_idx > max_rows:
+                                break
+                            if all(c is None or str(c).strip() == '' for c in row):
+                                empty_count += 1
+                                if empty_count >= empty_limit:
+                                    break
+                                continue
+                            empty_count = 0
+                            self._scan_excel_row_fast(row, row_idx, sheet_name,
+                                                      file_path, compiled_patterns, matches,
+                                                      max_cell_len)
+                    except Exception:
+                        continue
+            else:
+                for sheet_name in workbook.sheet_names:
+                    if self.stop_flag.is_set():
+                        break
+                    try:
+                        ws = workbook.sheet_by_name(sheet_name)
+                        empty_count = 0
+                        for row_idx in range(min(ws.nrows, max_rows)):
+                            if self.stop_flag.is_set():
+                                break
+                            row = ws.row_values(row_idx)
+                            if all(c is None or str(c).strip() == '' for c in row):
+                                empty_count += 1
+                                if empty_count >= empty_limit:
+                                    break
+                                continue
+                            empty_count = 0
+                            self._scan_excel_row_fast(row, row_idx + 1, sheet_name,
+                                                      file_path, compiled_patterns, matches,
+                                                      max_cell_len)
+                    except Exception:
+                        continue
+        finally:
+            if ext == '.xlsx':
+                try:
+                    workbook.close()
+                except Exception:
+                    pass
+        return matches
+
+    def _scan_excel_row_fast(self, row, row_idx, sheet_name, file_path, compiled_patterns, matches, max_cell_length=2000):
         """快速扫描Excel的一行数据（使用预编译正则）"""
-        MAX_CELL_LENGTH = 2000  # 跳过超长单元格内容
         for col_idx, cell_value in enumerate(row):
             if self.stop_flag.is_set():
                 return
             if cell_value is None:
                 continue
             cell_text = str(cell_value).strip()
-            if not cell_text or len(cell_text) < 2 or len(cell_text) > MAX_CELL_LENGTH:
+            if not cell_text or len(cell_text) < 2 or len(cell_text) > max_cell_length:
                 continue
 
-            # 列号转字母（A, B, ..., Z, AA, AB...）- 只算一次
+            # 列号转字母（A, B, ..., Z, AA, AB...）
             col_letter = ''
             c = col_idx
             while c >= 0:
