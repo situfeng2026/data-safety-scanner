@@ -709,7 +709,7 @@ def safe_delete_file(file_path):
 class DataSafetyScannerApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("数据安全检查工具 v1.0 - 开平农商行·数据银行部")
+        self.root.title("数据安全检查工具 v1.0 - 开平农银商行·数据银行部")
         self.root.geometry("1200x750")
         self.root.minsize(900, 600)
 
@@ -897,7 +897,7 @@ class DataSafetyScannerApp:
         # 底部版权栏
         copyright_frame = ttk.Frame(main_frame)
         copyright_frame.pack(fill=tk.X)
-        ttk.Label(copyright_frame, text="© 开平农商行·数据银行部",
+        ttk.Label(copyright_frame, text="© 开平农银商行·数据银行部",
                   font=('Helvetica', 9), foreground="#999").pack(side=tk.RIGHT, padx=5)
 
         # ===== 右键菜单 =====
@@ -1287,7 +1287,7 @@ class DataSafetyScannerApp:
                     f.write(f"  📂 扫描目录：{', '.join(report_data['scan_directories'])}\n")
                     f.write(f"  📄 扫描文件：{report_data['total_files_scanned']} 个\n")
                     f.write(f"  🔍 匹配总数：{report_data['total_matches']} 条\n\n")
-                    f.write(f"  © 开平农商行·数据银行部\n")
+                    f.write(f"  © 开平农银商行·数据银行部\n")
                     f.write("\n")
 
                     f.write("─" * 56 + "\n")
