@@ -82,11 +82,32 @@ SENSITIVE_PATTERNS = [
         "color": "#e74c3c"
     },
     {
-        "name": "住址关键词",
-        "pattern": r'(?:省|市|区|县|镇|乡|村|路|街|巷|号|栋|单元|室|号楼|小区|花园|大厦)',
-        "description": "可能包含详细地址（需人工确认）",
+        "name": "详细地址（带标签）",
+        "pattern": r'(?:地址|住址|家庭住址|户籍地址|通讯地址|联系地址|居住地|所在地)\s*[：:]\s*\S{4,}',
+        "description": "带有地址标签的完整地址，如\"地址：广州市天河区...\"",
+        "risk": "高",
+        "color": "#e74c3c"
+    },
+    {
+        "name": "四级地址（省市区路号）",
+        "pattern": r'(?:[^\d_]{2,}(?:省|自治区))[^\d_]{1,}(?:市)[^\d_]{1,}(?:区|县|镇)[^\d_]{1,}(?:路|街|巷|道|大道|大街)\S*?(?:号|巷|弄)',
+        "description": "省+市+区+路+号的完整地址",
+        "risk": "高",
+        "color": "#e74c3c"
+    },
+    {
+        "name": "三级地址（省市组合）",
+        "pattern": r'(?:(?:[^\d_]{2,}(?:省|自治区)[^\d_]{1,}(?:市|区|县))|(?:[^\d_]{2,}(?:市)[^\d_]{1,}(?:区|县)[^\d_]{1,}(?:路|街|巷|道)))',
+        "description": "省+市或市+区+路的组合地址",
         "risk": "中",
         "color": "#e67e22"
+    },
+    {
+        "name": "具体门牌号码",
+        "pattern": r'(?:(?:路|街|巷|道|大道|大街|弄)\s*[0-9]{1,5}\s*(?:号|弄|巷|室))|(?:[0-9]{1,5}\s*栋\s*(?:[0-9]{1,2}\s*单元\s*[0-9]{1,4}\s*室|[0-9]{1,4}\s*室))',
+        "description": "具体门牌号+栋+单元+室组合，如\"科技路88号\"或\"12栋3单元401室\"",
+        "risk": "高",
+        "color": "#e74c3c"
     },
 ]
 
@@ -809,8 +830,8 @@ class DataSafetyScannerApp:
             return
 
         file_path = filedialog.asksaveasfilename(
-            defaultextension=".json",
-            filetypes=[("JSON文件", "*.json"), ("文本文档", "*.txt")],
+            defaultextension=".txt",
+            filetypes=[("文本文档", "*.txt"), ("JSON文件", "*.json")],
             title="导出报告"
         )
         if not file_path:
@@ -836,21 +857,31 @@ class DataSafetyScannerApp:
                     json.dump(report_data, f, ensure_ascii=False, indent=2)
             else:
                 with open(file_path, 'w', encoding='utf-8') as f:
-                    f.write("=" * 60 + "\n")
-                    f.write("数据安全检查报告\n")
-                    f.write(f"扫描时间: {report_data['scan_time']}\n")
-                    f.write(f"扫描目录: {', '.join(report_data['scan_directories'])}\n")
-                    f.write(f"扫描文件: {report_data['total_files_scanned']} 个\n")
-                    f.write(f"匹配总数: {report_data['total_matches']} 条\n")
-                    f.write(f"  - 高风险: {report_data['risk_summary']['高']} 条\n")
-                    f.write(f"  - 中风险: {report_data['risk_summary']['中']} 条\n")
-                    f.write(f"  - 低风险: {report_data['risk_summary']['低']} 条\n")
-                    f.write("=" * 60 + "\n\n")
-                    for r in report_data['details']:
-                        f.write(f"[{r['risk']}] {r['file_path']}:{r['line_number']}\n")
-                        f.write(f"      类型: {r['pattern_name']} | 匹配: {r['matched_text']}\n")
-                        f.write(f"      上下文: {r['context']}\n")
-                        f.write("-" * 40 + "\n")
+                    f.write("=" * 56 + "\n")
+                    f.write("       数据安全检查报告\n")
+                    f.write("=" * 56 + "\n\n")
+                    f.write(f"  📅 扫描时间：{report_data['scan_time']}\n")
+                    f.write(f"  📂 扫描目录：{', '.join(report_data['scan_directories'])}\n")
+                    f.write(f"  📄 扫描文件：{report_data['total_files_scanned']} 个\n")
+                    f.write(f"  🔍 匹配总数：{report_data['total_matches']} 条\n\n")
+
+                    f.write("─" * 56 + "\n")
+                    f.write("  风险统计\n")
+                    f.write("─" * 56 + "\n")
+                    f.write(f"    🔴 高风险：{report_data['risk_summary']['高']} 条\n")
+                    f.write(f"    🟡 中风险：{report_data['risk_summary']['中']} 条\n")
+                    f.write(f"    🟢 低风险：{report_data['risk_summary']['低']} 条\n\n")
+
+                    f.write("─" * 56 + "\n")
+                    f.write("  敏感信息详单\n")
+                    f.write("─" * 56 + "\n\n")
+                    for i, r in enumerate(report_data['details'], 1):
+                        risk_symbol = "🔴" if r['risk'] == '高' else ("🟡" if r['risk'] == '中' else "🟢")
+                        f.write(f"  【第 {i} 条】{risk_symbol} [{r['risk']}] {r['pattern_name']}\n")
+                        f.write(f"     文件：{r['file_path']} → 第 {r['line_number']} 行\n")
+                        f.write(f"     内容：{r['matched_text']}\n")
+                        f.write(f"     上下文：{r['context']}\n")
+                        f.write("  " + "·" * 52 + "\n\n")
 
             messagebox.showinfo("导出成功", f"报告已保存到:\n{file_path}")
         except Exception as e:
