@@ -760,7 +760,14 @@ class DataSafetyScannerApp:
 
     def _setup_styles(self):
         style = ttk.Style()
-        style.theme_use('clam')
+        # Windows用vista主题(原生)，其他用clam
+        if sys.platform == 'win32':
+            try:
+                style.theme_use('vista')
+            except Exception:
+                style.theme_use('clam')
+        else:
+            style.theme_use('clam')
         style.configure('Treeview', rowheight=28, font=('Helvetica', 12))
         style.configure('Treeview.Heading', font=('Helvetica', 13, 'bold'), padding=(5, 5))
         style.configure('High.Treeview', foreground='#e74c3c')
@@ -865,12 +872,8 @@ class DataSafetyScannerApp:
         progress_frame = ttk.Frame(main_frame)
         progress_frame.pack(fill=tk.X, pady=(0, 5))
 
-        self.progress_bar = ttk.Progressbar(progress_frame, mode='determinate')
+        self.progress_bar = ttk.Progressbar(progress_frame, mode='determinate', length=200)
         self.progress_bar.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        # 进度条设为蓝色
-        style = ttk.Style()
-        style.configure("blue.Horizontal.TProgressbar", background='#0078d7')
-        self.progress_bar.configure(style="blue.Horizontal.TProgressbar")
 
         self.progress_label = ttk.Label(progress_frame, text="", width=30)
         self.progress_label.pack(side=tk.RIGHT, padx=10)
