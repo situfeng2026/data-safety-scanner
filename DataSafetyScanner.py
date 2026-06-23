@@ -286,11 +286,14 @@ class ScanEngine:
 
         matches = []
         lines = content.split('\n')
+        MAX_LINE_LENGTH = 5000
 
         for regex, pattern_info in compiled:
             for line_idx, line in enumerate(lines):
                 if self.stop_flag.is_set():
                     return matches
+                if len(line) > MAX_LINE_LENGTH:
+                    continue
 
                 for match in regex.finditer(line):
                     matched_text = match.group()
@@ -384,14 +387,25 @@ class ScanEngine:
 
     def _scan_excel_row_fast(self, row, row_idx, sheet_name, file_path, compiled_patterns, matches):
         """快速扫描Excel的一行数据（使用预编译正则）"""
+        MAX_CELL_LENGTH = 2000  # 跳过超长单元格内容
         for col_idx, cell_value in enumerate(row):
             if self.stop_flag.is_set():
                 return
             if cell_value is None:
                 continue
             cell_text = str(cell_value).strip()
-            if not cell_text or len(cell_text) < 2:
+            if not cell_text or len(cell_text) < 2 or len(cell_text) > MAX_CELL_LENGTH:
                 continue
+
+            # 列号转字母（A, B, ..., Z, AA, AB...）- 只算一次
+            col_letter = ''
+            c = col_idx
+            while c >= 0:
+                col_letter = chr(65 + (c % 26)) + col_letter
+                c = c // 26 - 1
+                if c < 0:
+                    break
+            cell_ref = f"{col_letter}{row_idx}"
 
             for regex, pattern_info in compiled_patterns:
                 for match in regex.finditer(cell_text):
@@ -400,16 +414,6 @@ class ScanEngine:
                     context_start = max(0, start_pos - 20)
                     context_end = min(len(cell_text), start_pos + len(matched_text) + 20)
                     context = cell_text[context_start:context_end].strip()
-
-                    # 列号转字母（A, B, ..., Z, AA, AB...）
-                    col_letter = ''
-                    c = col_idx
-                    while c >= 0:
-                        col_letter = chr(65 + (c % 26)) + col_letter
-                        c = c // 26 - 1
-                        if c < 0:
-                            break
-                    cell_ref = f"{col_letter}{row_idx}"
 
                     matches.append({
                         'file_path': file_path,
