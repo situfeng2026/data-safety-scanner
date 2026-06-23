@@ -20,8 +20,11 @@ jobs:
       - name: Install PyInstaller & dependencies
         run: pip install pyinstaller openpyxl xlrd python-docx pypdf python-pptx
 
+      - name: Install UPX (compression)
+        run: choco install upx -y --no-progress
+
       - name: Build EXE
-        run: pyinstaller --onefile --windowed --name "数据安全检查工具" --add-data "README.md;." DataSafetyScanner.py
+        run: pyinstaller --onefile --windowed --upx-dir="C:\ProgramData\chocolatey\bin" --name "数据安全检查工具" --add-data "README.md;." DataSafetyScanner.py
 
       - name: Upload EXE
         uses: actions/upload-artifact@v4
