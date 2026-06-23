@@ -572,9 +572,10 @@ class DataSafetyScannerApp:
         result_frame.grid_rowconfigure(0, weight=1)
         result_frame.grid_columnconfigure(0, weight=1)
 
-        # 绑定右键菜单
+        # 绑定右键菜单和双击事件
         self.tree.bind('<Button-3>', self._show_context_menu)
         self.tree.bind('<Control-Button-1>', self._show_context_menu)  # macOS右键
+        self.tree.bind('<Double-1>', self._on_double_click)
 
         # ===== 底部统计 =====
         stats_frame = ttk.Frame(main_frame)
@@ -590,6 +591,7 @@ class DataSafetyScannerApp:
         # ===== 右键菜单 =====
         self.context_menu = tk.Menu(self.root, tearoff=0, font=('Helvetica', 12))
         self.context_menu.add_command(label="📂 打开文件所在位置", command=self._open_file_location)
+        self.context_menu.add_command(label="📄 打开文件", command=self._open_selected_file)
         self.context_menu.add_separator()
         self.context_menu.add_command(label="✂️ 脱敏处理（替换为***）", command=self._redact_selected)
         self.context_menu.add_command(label="🗑 删除文件（移入废纸篓）", command=self._delete_selected)
@@ -780,6 +782,30 @@ class DataSafetyScannerApp:
         dir_path = os.path.dirname(file_path)
         import subprocess
         subprocess.run(['open', dir_path])
+
+    def _open_selected_file(self):
+        """用系统默认程序打开选中的文件"""
+        selected = self._get_selected_results()
+        if not selected:
+            return
+        file_path = selected[0]['file_path']
+        if not os.path.exists(file_path):
+            messagebox.showerror("错误", f"文件不存在:\n{file_path}")
+            return
+        import subprocess
+        if sys.platform == 'win32':
+            os.startfile(file_path)
+        elif sys.platform == 'darwin':
+            subprocess.run(['open', file_path])
+        else:
+            subprocess.run(['xdg-open', file_path])
+        self.status_label.config(text=f"已打开: {os.path.basename(file_path)}")
+
+    def _on_double_click(self, event):
+        """双击结果行时打开文件"""
+        selection = self.tree.selection()
+        if selection:
+            self._open_selected_file()
 
     def _redact_selected(self):
         selected = self._get_selected_results()
