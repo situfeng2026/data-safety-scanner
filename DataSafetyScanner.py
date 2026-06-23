@@ -775,13 +775,25 @@ class DataSafetyScannerApp:
         return selected
 
     def _open_file_location(self):
+        """打开文件所在位置并选中文件"""
         selected = self._get_selected_results()
         if not selected:
             return
         file_path = selected[0]['file_path']
-        dir_path = os.path.dirname(file_path)
+        if not os.path.exists(file_path):
+            messagebox.showerror("错误", f"文件不存在:\n{file_path}")
+            return
         import subprocess
-        subprocess.run(['open', dir_path])
+        if sys.platform == 'win32':
+            # Windows: explorer /select 打开文件夹并选中文件
+            subprocess.run(['explorer', '/select,', file_path])
+        elif sys.platform == 'darwin':
+            # macOS: open -R 在Finder中定位文件
+            subprocess.run(['open', '-R', file_path])
+        else:
+            # Linux: 打开所在目录
+            subprocess.run(['xdg-open', os.path.dirname(file_path)])
+        self.status_label.config(text=f"已定位: {os.path.basename(file_path)}")
 
     def _open_selected_file(self):
         """用系统默认程序打开选中的文件"""
