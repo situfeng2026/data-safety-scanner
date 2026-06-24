@@ -226,8 +226,10 @@ class ScanEngine:
     def stop(self):
         self.stop_flag.set()
 
-    def scan_file(self, file_path, enabled_patterns):
-        """扫描单个文件，返回匹配结果列表"""
+    def scan_file(self, file_path, pattern_input):
+        """扫描单个文件，返回匹配结果列表
+        pattern_input: 可以是原始规则列表(dict)或预编译列表([(regex, dict), ...])
+        """
         if self.stop_flag.is_set():
             return []
 
@@ -239,19 +241,24 @@ class ScanEngine:
         try:
             file_size = os.path.getsize(file_path)
             if file_size > MAX_FILE_SIZE:
-                return []  # 跳过过大文件
+                return []
             if file_size == 0:
                 return []
         except (OSError, IOError):
             return []
 
-        # 预编译正则（只做一次）
-        compiled = []
-        for p in enabled_patterns:
-            try:
-                compiled.append((re.compile(p['pattern']), p))
-            except re.error:
-                continue
+        # 处理输入：兼容原始规则和预编译两种格式
+        if pattern_input and isinstance(pattern_input[0], dict):
+            # 原始规则 -> 预编译
+            compiled = []
+            for p in pattern_input:
+                try:
+                    compiled.append((re.compile(p['pattern']), p))
+                except re.error:
+                    continue
+        else:
+            # 已经是预编译列表
+            compiled = pattern_input
 
         # Excel文件处理
         if SUPPORTED_EXTENSIONS.get(ext) == 'excel':
@@ -273,29 +280,37 @@ class ScanEngine:
         if SUPPORTED_EXTENSIONS.get(ext) == 'database':
             return self._scan_database_file(file_path, compiled)
 
-        # 尝试以文本方式读取（纯文本文件）
+        # ==================== 流式读取纯文本文件 ====================
+        # 不再f.read()加载整个文件，逐行边读边扫
         try:
-            with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
-                content = f.read()
+            f = open(file_path, 'r', encoding='utf-8', errors='replace')
         except Exception:
             try:
-                with open(file_path, 'r', encoding='gbk', errors='replace') as f:
-                    content = f.read()
+                f = open(file_path, 'r', encoding='gbk', errors='replace')
             except Exception:
                 return []
 
-        matches = []
-        lines = content.split('\n')
-        MAX_LINE_LENGTH = 5000
+        # 构建合并正则：一行只跑1次finditer，不跑20次
+        combined_parts = []
+        for i, (_, pattern_info) in enumerate(compiled):
+            combined_parts.append((f'(?P<P{i}>{pattern_info["pattern"]})', pattern_info))
+        combined_regex = re.compile('|'.join(c[0] for c in combined_parts))
 
-        for regex, pattern_info in compiled:
-            for line_idx, line in enumerate(lines):
+        matches = []
+        MAX_LINE_LENGTH = 5000
+        with f:
+            for line_idx, line in enumerate(f):
                 if self.stop_flag.is_set():
                     return matches
-                if len(line) > MAX_LINE_LENGTH:
+                line = line.rstrip('\n\r')
+                if not line or len(line) < 2 or len(line) > MAX_LINE_LENGTH:
                     continue
 
-                for match in regex.finditer(line):
+                for match in combined_regex.finditer(line):
+                    if match.lastgroup is None:
+                        continue
+                    pat_idx = int(match.lastgroup[1:])  # 'P0' -> 0
+                    _, pattern_info = compiled[pat_idx]
                     matched_text = match.group()
                     start_pos = match.start()
 
@@ -306,9 +321,8 @@ class ScanEngine:
 
                     # 关键词地址类型特殊处理 - 需要更多上下文判断
                     if pattern_info['name'] == '住址关键词':
-                        # 取整行作为上下文
                         context = line.strip()
-                        if len(context) < 10:  # 太短可能只是无关匹配
+                        if len(context) < 10:
                             continue
 
                     matches.append({
@@ -316,7 +330,7 @@ class ScanEngine:
                         'file_name': os.path.basename(file_path),
                         'file_dir': os.path.dirname(file_path),
                         'line_number': line_idx + 1,
-                        'matched_text': matched_text[:100],  # 截断过长匹配
+                        'matched_text': matched_text[:100],
                         'pattern_name': pattern_info['name'],
                         'risk': pattern_info['risk'],
                         'context': context,
@@ -673,35 +687,66 @@ class ScanEngine:
         return results
 
     def scan_directory(self, directory, enabled_patterns, progress_callback=None):
-        """递归扫描目录"""
+        """递归扫描目录 - 多线程并行"""
+        import threading
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
         results = []
+        lock = threading.Lock()
         self.scanned_files = 0
         self.matched_files = 0
         self.total_matches = 0
 
+        # 先收集所有文件路径
+        file_paths = []
         for root, dirs, files in os.walk(directory):
-            # 跳过隐藏目录和系统目录
             dirs[:] = [d for d in dirs if not d.startswith('.') and d not in
                        ('node_modules', '__pycache__', '.git', '.svn', 'venv', '.venv', 'env')]
-
             if self.stop_flag.is_set():
-                break
-
+                return results
             for file in files:
+                file_paths.append(os.path.join(root, file))
+
+        total = len(file_paths)
+        if total == 0:
+            return results
+
+        # 预编译正则（只做一次给所有线程共用）
+        compiled = []
+        for p in enabled_patterns:
+            try:
+                compiled.append((re.compile(p['pattern']), p))
+            except re.error:
+                continue
+
+        # 4个Worker并行扫描（I/O+CPU混合，4核最优）
+        workers = min(4, total)
+
+        def scan_one(fp):
+            if self.stop_flag.is_set():
+                return fp, []
+            return fp, self.scan_file(fp, compiled)
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_map = {executor.submit(scan_one, fp): fp for fp in file_paths}
+
+            for future in as_completed(future_map):
                 if self.stop_flag.is_set():
                     break
-
-                file_path = os.path.join(root, file)
-                self.scanned_files += 1
-
-                file_matches = self.scan_file(file_path, enabled_patterns)
-                if file_matches:
-                    self.matched_files += 1
-                    self.total_matches += len(file_matches)
-                    results.extend(file_matches)
-
-                if progress_callback:
-                    progress_callback(self.scanned_files, self.matched_files, file_path)
+                fp = future_map[future]
+                try:
+                    _, file_matches = future.result()
+                    with lock:
+                        if file_matches:
+                            self.matched_files += 1
+                            self.total_matches += len(file_matches)
+                            results.extend(file_matches)
+                        self.scanned_files += 1
+                        if progress_callback:
+                            progress_callback(self.scanned_files, self.matched_files, fp)
+                except Exception:
+                    with lock:
+                        self.scanned_files += 1
 
         return results
 
